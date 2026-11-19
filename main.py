@@ -16,7 +16,8 @@ faster (players progressing through the game).
 - Time is hours since the game's release, x = ln(1 + t). Over the reads of
   the last 24 hours before the checkpoint (all reads when fewer), least
   squares fits ln(players tracked) on x, and, per trophy, ln(earners + 0.5)
-  on x, where earners = rate * players / 100. A power law in (1 + t) is the
+  on x, where earners = rate * players / 100. A fit uses only the reads
+  where the trophy really had a rate (a null is never fitted as 0.01). A power law in (1 + t) is the
   middle ground between exponential growth (which explodes over a 4.5-day
   horizon) and a flat line: launch adoption grows fast, then decelerates.
 - Per-trophy slopes are shrunk toward the cross-trophy median slope with an
@@ -211,12 +212,16 @@ def forecast_case(case, name):
     x_target = math.log1p(max(t_target, 0.0))
 
     # Series: hours since release, players tracked, per-trophy rates (nulls filled
-    # forward from the last read that had the trophy, else 0.01).
-    times, players, rates = [], [], []
+    # forward from the last read that had the trophy, else 0.01). `raw` keeps
+    # the rates as read, so a fit never learns from a filled-in value: a
+    # trophy that only just appeared (nulls before) gets a flat fit at its
+    # last earners instead of an explosive slope off the 0.01 fill.
+    times, players, rates, raw = [], [], [], []
     last_rate = [0.01] * len(trophies)
     for read in history:
         times.append((parse_time(read["at"]) - release).total_seconds() / 3600.0)
         players.append(read["players_tracked"])
+        raw.append(read["rates"])
         row = []
         for i, r in enumerate(read["rates"]):
             if r is not None:
@@ -260,10 +265,22 @@ def forecast_case(case, name):
     n_hat = max(n_hat, float(n_last))
 
     # Per-trophy log-earners fits, slopes shrunk to the cross-trophy median.
+    # Each fit uses only the reads where the trophy really had a rate; a
+    # trophy with fewer than two such reads in the window is held flat at
+    # its last earners (its slope error stays wide, so shrinkage still
+    # pulls it toward the median rather than letting it run wild).
     slopes, ses, fits = [], [], []
     for i in range(len(trophies)):
-        ys = [math.log(max(rates[k][i] * players[k] / 100.0, 0.0) + 0.5) for k in idx]
-        a, b, sd, se, xb, sx, n = ols(xs, ys)
+        pts = [
+            (xs[j], math.log(max(rates[idx[j]][i] * players[idx[j]] / 100.0, 0.0) + 0.5))
+            for j in range(len(idx))
+            if raw[idx[j]][i] is not None
+        ]
+        if len(pts) >= 2:
+            a, b, sd, se, xb, sx, n = ols([p[0] for p in pts], [p[1] for p in pts])
+        else:
+            e0 = rates[-1][i] * n_last / 100.0
+            a, b, sd, se, xb, sx, n = math.log(e0 + 0.5), 0.0, 0.5, 0.5, xs[-1], 0.0, len(pts)
         slopes.append(b)
         ses.append(se)
         fits.append((a, b, sd, xb, sx, n))
